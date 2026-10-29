@@ -101,6 +101,8 @@ details.settings[open] summary::after{content:"–"}
 
 .stats{display:grid;gap:18px}
 .statshead{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:end;justify-content:space-between}
+.statctl{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:end}
+.statctl .check{min-height:38px}
 .kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
 @media (max-width:860px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .kpi{padding:14px 16px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);margin:0 -1px -1px 0;display:grid;gap:2px;min-width:0}
@@ -232,7 +234,10 @@ td.n{font-variant-numeric:tabular-nums}
   <section class="stats" aria-labelledby="statsH">
     <div class="statshead">
       <div><div class="eyebrow">Statistics</div><h2 id="statsH" style="font-size:1.4rem">Your run-length distribution</h2></div>
-      <div class="field"><label for="statPat">Showing</label><select id="statPat"></select></div>
+      <div class="statctl">
+        <label class="check" title="Off: runs that end without a floor thud are treated as censored (you could have kept going)."><input type="checkbox" id="stopsIn"> Count clean stops as drops</label>
+        <div class="field"><label for="statPat">Showing</label><select id="statPat"></select></div>
+      </div>
     </div>
     <div class="kpis" id="kpis"></div>
     <p class="physics" id="physics"></p>
@@ -259,7 +264,7 @@ td.n{font-variant-numeric:tabular-nums}
     <summary style="cursor:pointer;font-weight:600;color:var(--ink)">How the counting works</summary>
     <p>Each frame is filtered for the ball colour. Every throw is a free-fall parabola with the same gravity, so each detected ball position votes for the apex times and heights it could belong to; peaks with support on both sides of the apex, moving steadily sideways, count as throws. Gravity in pixels is measured from your own clean arcs, which also turns apex heights into centimetres.</p>
     <p>A pause longer than the run break ends a run. A low-frequency thud in the audio within 1.6 s of the last throw marks a drop; otherwise the run counts as a clean stop. Catches are throws, minus the dropped ball when it was seen falling.</p>
-    <p>The survival curve is a Kaplan–Meier estimate with clean stops treated as censored. The fitted line assumes the same drop chance p on every catch, estimated as drops ÷ (drops + catches).</p>
+    <p>The survival curve is a Kaplan–Meier estimate. With "Count clean stops as drops" on (the default), every run's end counts as a failure; turn it off to treat clean stops as censored instead. The fitted line assumes the same drop chance p on every catch, estimated as drops ÷ (drops + catches).</p>
   </details>
 </div>
 <input type="file" id="recIn" accept="video/*" capture="environment" hidden>
@@ -772,8 +777,8 @@ function renderSession(){
 
 // ---------- statistics ----------
 function stats(runs){
-  const D=runs.filter(r=>r.ended==="drop").length, Cn=runs.reduce((s,r)=>s+r.catches,0), maxN=runs.reduce((m,r)=>Math.max(m,r.catches),0);
-  const d=new Array(maxN+2).fill(0); runs.forEach(r=>{ if(r.ended==="drop") d[r.catches]++; });
+  const D=runs.filter(r=>eff(r)==="drop").length, Cn=runs.reduce((s,r)=>s+r.catches,0), maxN=runs.reduce((m,r)=>Math.max(m,r.catches),0);
+  const d=new Array(maxN+2).fill(0); runs.forEach(r=>{ if(eff(r)==="drop") d[r.catches]++; });
   let Sv=1; const km=[{n:0,s:1}], haz=[];
   for(let j=0;j<=maxN;j++){ const risk=runs.filter(r=>r.catches>j).length+d[j]; const h=risk?d[j]/risk:0; haz.push({j,d:d[j],r:risk}); Sv*=1-h; km.push({n:j+1,s:Sv}); }
   const p=D/(D+Cn||1), se=Math.sqrt(p*(1-p)/((D+Cn)||1));
@@ -789,6 +794,9 @@ function renderStatPick(){
   sel.value=cur||""; return cur;
 }
 $("#statPat").onchange=e=>{ S.statPat=e.target.value; saveS(); renderStats(); };
+if(S.stopsAsDrops===undefined) S.stopsAsDrops=true;
+function eff(r){ return S.stopsAsDrops?"drop":r.ended; }   // effective ending for statistics only; stored labels are untouched
+$("#stopsIn").checked=S.stopsAsDrops; $("#stopsIn").onchange=e=>{ S.stopsAsDrops=e.target.checked; saveS(); renderStats(); };
 
 function renderStats(){
   const pat=renderStatPick(), runs=store.runs.filter(r=>r.pattern===pat), st=stats(runs), k=$("#kpis");
@@ -844,14 +852,15 @@ function drawSurv(st){
   for(let i=1;i<st.km.length;i++){ const q=st.km[i], prev=st.km[i-1]; if(q.s<=0){ sp+=`L${X(q.n)},${Y(prev.s)}L${X(q.n)},${h-m.b}`; break; } sp+=`L${X(q.n)},${Y(prev.s)}L${X(q.n)},${Y(q.s)}`; }
   st.km.forEach(q=>{ if(q.s>0) pts.push({x:X(q.n),y:Y(q.s),html:`<b>${Math.round(q.s*100)}%</b> of runs reached ${q.n} catch${q.n===1?"":"es"}`+(st.D?`<br>constant-p fit: ${Math.round(Math.pow(1-st.p,q.n)*100)}%`:"")}); });
   g+=`<path d="${sp}" fill="none" stroke="${C.ink}" stroke-width="2" stroke-linejoin="round"/>`;
-  const stops={};  // tick marks for clean stops (censored runs) store.runs.filter(r=>r.pattern===$("#statPat").value && r.ended==="stop").forEach(r=>stops[r.catches]=(stops[r.catches]||0)+1);
+  const stops={};  // tick marks for clean stops (censored runs)
+  store.runs.filter(r=>r.pattern===$("#statPat").value && eff(r)==="stop").forEach(r=>stops[r.catches]=(stops[r.catches]||0)+1);
   for(const n in stops){ const s=st.km[+n].s; if(s>0) g+=`<line x1="${X(+n)}" x2="${X(+n)}" y1="${Y(s)-6}" y2="${Y(s)+6}" stroke="${C.ink}" stroke-width="2"/>`; }
   g+=`<circle class="hl" r="5" fill="${C.ink}" stroke="${C.bg}" stroke-width="2" opacity="0"/>`;
   plot.innerHTML=`<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Survival curve of run lengths">${g}</svg>`;
   hover("#chSurv",plot.querySelector("svg"),pts);
   $("#chSurv .legend").innerHTML=`<span class="key"><svg width="22" height="10"><line x1="0" x2="22" y1="5" y2="5" stroke="${C.ink}" stroke-width="2"/></svg>Your runs (Kaplan–Meier)</span>`+
     (st.D?`<span class="key"><svg width="22" height="10"><line x1="0" x2="22" y1="5" y2="5" stroke="${C.ball}" stroke-width="2" stroke-dasharray="6 5"/></svg>Constant drop chance, p = ${(100*st.p).toFixed(1)}%</span>`:"")+
-    `<span class="key"><svg width="10" height="12"><line x1="5" x2="5" y1="0" y2="12" stroke="${C.ink}" stroke-width="2"/></svg>Clean stop (censored)</span>`;
+    (Object.keys(stops).length?`<span class="key"><svg width="10" height="12"><line x1="5" x2="5" y1="0" y2="12" stroke="${C.ink}" stroke-width="2"/></svg>Clean stop (censored)</span>`:"");
 }
 
 function drawHaz(st){
@@ -886,13 +895,13 @@ function drawTrend(runs){
     g+=`<path d="${p}" fill="none" stroke="${C.ball}" stroke-width="2"/>`; }
   const pts=[], r=n>60?3:4.5;
   runs.forEach((q,i)=>{ const x=X(i), y=Y(q.catches);
-    g+=q.ended==="drop"?`<circle cx="${x}" cy="${y}" r="${r}" fill="${C.drop}" stroke="${C.bg}" stroke-width="1.5"/>`:`<circle cx="${x}" cy="${y}" r="${r-0.75}" fill="${C.bg}" stroke="${C["ink-2"]}" stroke-width="1.5"/>`;
-    pts.push({x,y,html:`Run ${i+1}: <b>${q.catches}</b> catches, ${q.ended==="drop"?"dropped":"clean stop"}<br>${new Date(q.at).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})}`}); });
+    g+=eff(q)==="drop"?`<circle cx="${x}" cy="${y}" r="${r}" fill="${C.drop}" stroke="${C.bg}" stroke-width="1.5"/>`:`<circle cx="${x}" cy="${y}" r="${r-0.75}" fill="${C.bg}" stroke="${C["ink-2"]}" stroke-width="1.5"/>`;
+    pts.push({x,y,html:`Run ${i+1}: <b>${q.catches}</b> catches, ${q.ended==="drop"?"dropped":"clean stop"+(S.stopsAsDrops?" (counted as a drop)":"")}<br>${new Date(q.at).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})}`}); });
   g+=`<line x1="${m.l}" x2="${w-m.r}" y1="${h-m.b}" y2="${h-m.b}" stroke="${C.muted}"/><text class="ax" x="${m.l}" y="${h-m.b+16}">1</text><text class="ax" x="${w-m.r}" y="${h-m.b+16}" text-anchor="end">${n}</text><text class="axt" x="${m.l+iw/2}" y="${h-4}" text-anchor="middle">run, in order</text>`;
   g+=`<circle class="hl" r="8" fill="none" stroke="${C.ink}" stroke-width="2" opacity="0"/>`;
   plot.innerHTML=`<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Catches per run over time">${g}</svg>`;
   hover("#chTrend",plot.querySelector("svg"),pts);
-  $("#chTrend .legend").innerHTML=`<span class="key"><svg width="12" height="12"><circle cx="6" cy="6" r="4.5" fill="${C.drop}"/></svg>Ended in a drop</span><span class="key"><svg width="12" height="12"><circle cx="6" cy="6" r="3.75" fill="none" stroke="${C["ink-2"]}" stroke-width="1.5"/></svg>Clean stop</span>`+(n>=8?`<span class="key"><svg width="22" height="10"><line x1="0" x2="22" y1="5" y2="5" stroke="${C.ball}" stroke-width="2"/></svg>Rolling median</span>`:"");
+  $("#chTrend .legend").innerHTML=`<span class="key"><svg width="12" height="12"><circle cx="6" cy="6" r="4.5" fill="${C.drop}"/></svg>${S.stopsAsDrops?"Ended (drop or forced stop)":"Ended in a drop"}</span>`+(S.stopsAsDrops?"":`<span class="key"><svg width="12" height="12"><circle cx="6" cy="6" r="3.75" fill="none" stroke="${C["ink-2"]}" stroke-width="1.5"/></svg>Clean stop</span>`)+(n>=8?`<span class="key"><svg width="22" height="10"><line x1="0" x2="22" y1="5" y2="5" stroke="${C.ball}" stroke-width="2"/></svg>Rolling median</span>`:"");
 }
 
 // ---------- run log ----------
