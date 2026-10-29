@@ -61,6 +61,11 @@ select:focus-visible,input:focus-visible,button:focus-visible,summary:focus-visi
 .pill.drop{background:var(--drop);color:#fff}
 .progress{position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,.12)}
 .progress i{display:block;height:100%;width:0;background:var(--ball)}
+.meter{position:absolute;left:14px;bottom:14px;display:flex;align-items:center;gap:8px;color:var(--on-stage);font-family:var(--f-mono);font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;pointer-events:none;text-shadow:0 1px 6px rgba(0,0,0,.6)}
+.meter .bar{position:relative;width:120px;height:8px;border-radius:4px;background:rgba(255,255,255,.18);overflow:hidden}
+.meter i{position:absolute;left:0;top:0;bottom:0;width:0;background:var(--on-stage);opacity:.85}
+.meter b{position:absolute;top:0;bottom:0;width:2px;background:var(--drop)}
+.meter.hot i{background:var(--drop);opacity:1}
 .empty{color:var(--on-stage);text-align:left;padding:28px 22px;max-width:44ch;display:grid;gap:14px}
 .empty h3{font-family:var(--f-display);font-size:2rem;font-weight:800;line-height:1}
 .empty p{margin:0;opacity:.85}
@@ -164,6 +169,7 @@ td.n{font-variant-numeric:tabular-nums}
           <div class="hud"><div class="count" id="count">–</div><div class="count-label" id="countLabel">ready</div></div>
           <div class="pill" id="pill">Clip loaded</div>
           <div class="progress"><i id="prog"></i></div>
+          <div class="meter" id="meter" hidden title="Microphone loudness; a drop registers past the tick"><span>mic</span><div class="bar"><i></i><b></b></div></div>
         </div>
         <div class="empty" id="empty">
           <div class="eyebrow" style="color:inherit;opacity:.7">Start here</div>
@@ -631,28 +637,42 @@ async function startLive(){
   try{ await vid.play(); }catch(e){}
   if(!vid.videoWidth) await once(vid,"loadedmetadata").catch(()=>{});
   setupSizes(); clip=null; sessionLabel="Live session"; resetBallSize();
-  if(hasMic){ try{ const AC=window.AudioContext||window.webkitAudioContext, ac=new AC(), src=ac.createMediaStreamSource(stream); let node=src;
+  if(hasMic && stream.getAudioTracks().length){ try{ const ac=ensureAC(), src=ac.createMediaStreamSource(stream); let node=src;
       for(const [type,f] of [["highpass",40],["highpass",40],["lowpass",400],["lowpass",400]]){ const bq=ac.createBiquadFilter(); bq.type=type; bq.frequency.value=f; node.connect(bq); node=bq; }
-      const an=ac.createAnalyser(); an.fftSize=1024; node.connect(an); mic={ac,an,buf:new Float32Array(1024),ring:[],med:0,last:-1}; }catch(e){ hasMic=false; } }
+      const an=ac.createAnalyser(); an.fftSize=1024; node.connect(an); mic={ac,src,an,buf:new Float32Array(1024),ring:[],med:0,last:-1,lvl:0};
+      if(ac.state!=="running"){ try{ await ac.resume(); }catch(e){} }
+      if(ac.state!=="running"){ msg("Tap the video once to switch on the microphone.",true);
+        $("#stage").addEventListener("pointerdown",()=>{ ac.resume().then(()=>msg("Microphone on. Juggle when ready.")).catch(()=>{}); },{once:true}); }
+    }catch(e){ hasMic=false; } }
+  else hasMic=false;
+  $("#meter").hidden=!hasMic;
   sessionRuns=[]; renderSession(); flashes=[];
   det=makeDetector(hasMic,"live"); mode="live"; active=true; lastFrameT=null;
   try{ wake=await navigator.wakeLock.request("screen"); }catch(e){}
   $("#stopBtn").hidden=false; $("#goBtn").disabled=true; ["calBtn","maskBtn"].forEach(id=>$("#"+id).disabled=false); $("#liveBtn").classList.add("on");
   setPill("Live · waiting"); setCount(0,"catches"); $("#prog").style.width="0%";
-  msg(hasMic?"Live: juggle when ready. Runs are saved as they end.":"Live without microphone: drops are judged from the video only.",!hasMic);
+  if(!(mic && mic.ac.state!=="running"))
+    msg(hasMic?"Live with microphone: juggle when ready. The mic bar should jump when a ball hits the floor; runs are saved as they end.":"Live without microphone (permission was refused or no mic found): drops are judged from the video only.",!hasMic);
   loop();
 }
 function pollMic(t){
   if(!mic) return; mic.an.getFloatTimeDomainData(mic.buf); let s=0; for(const v of mic.buf) s+=v*v; const rms=Math.sqrt(s/mic.buf.length);
   mic.ring.push(rms); if(mic.ring.length>400) mic.ring.shift(); if(mic.ring.length%30===0) mic.med=median(mic.ring);
   if(mic.ring.length>60 && mic.med>0 && rms>S.thud*mic.med && t-mic.last>0.15){ mic.last=t; det.addThud(t); }
+  // level meter: loudness relative to the room's background, log scale 1x..60x, tick at the drop threshold
+  const ratio=mic.med>0?rms/mic.med:0, pos=r=>Math.max(0,Math.min(100,100*Math.log(Math.max(r,1))/Math.log(60)));
+  mic.lvl=Math.max(pos(ratio),mic.lvl*0.9);
+  $("#meter i").style.width=mic.lvl.toFixed(1)+"%"; $("#meter b").style.left=pos(S.thud).toFixed(1)+"%";
+  $("#meter").classList.toggle("hot",ratio>S.thud);
 }
+function ensureAC(){ const AC=window.AudioContext||window.webkitAudioContext; if(!window.__ccAC||window.__ccAC.state==="closed") window.__ccAC=new AC(); return window.__ccAC; }
 async function stopAll(){
   if(active && mode==="clip"){ finishClip(); }
   else if(active && mode==="live"){ active=false; det.finish(); mode=null; msg(`Live session ended: ${sessionRuns.length} run${sessionRuns.length===1?"":"s"} saved.`); }
   active=false;
   if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
-  if(mic){ try{ mic.ac.close(); }catch(e){} mic=null; }
+  if(mic){ try{ mic.src.disconnect(); }catch(e){} mic=null; }
+  $("#meter").hidden=true;
   if(wake){ try{ await wake.release(); }catch(e){} wake=null; }
   $("#liveBtn").classList.remove("on"); $("#stopBtn").hidden=true;
 }
@@ -663,7 +683,8 @@ $("#recBtn").onclick=$("#recBtn2").onclick=()=>pick("#recIn");
 $("#upBtn").onclick=$("#upBtn2").onclick=()=>pick("#upIn");
 $("#recIn").onchange=e=>{ loadClip(e.target.files[0]); e.target.value=""; };
 $("#upIn").onchange=e=>{ loadClip(e.target.files[0]); e.target.value=""; };
-$("#liveBtn").onclick=()=>{ if(mode==="live") stopAll(); else startLive(); };
+function unlockAudio(){ try{ const ac=ensureAC(); if(ac.state!=="running") ac.resume().catch(()=>{}); }catch(e){} }  // must run inside the tap
+$("#liveBtn").onclick=()=>{ if(mode==="live") stopAll(); else { unlockAudio(); startLive(); } };
 $("#goBtn").onclick=analyse;
 $("#stopBtn").onclick=()=>stopAll();
 $("#speed").value=String(S.speed); $("#speed").onchange=e=>{ S.speed=+e.target.value; saveS(); if(mode==="clip") vid.playbackRate=S.speed; };
@@ -690,7 +711,7 @@ function setFacing(f){ S.facing=f; saveS(); $("#facing").value=f; $("#flipLabel"
 setFacing(S.facing);
 $("#facing").onchange=e=>{ setFacing(e.target.value); if(mode==="live") startLive(); };
 $("#flipBtn").onclick=()=>{ setFacing(S.facing==="user"?"environment":"user");
-  if(mode==="live") startLive(); else toast(`Live will use the ${S.facing==="user"?"front":"back"} camera`); };
+  if(mode==="live"){ unlockAudio(); startLive(); } else toast(`Live will use the ${S.facing==="user"?"front":"back"} camera`); };
 $("#voiceIn").checked=!!S.voice; $("#voiceIn").onchange=e=>{ S.voice=e.target.checked; saveS(); };
 
 function renderPatternSelect(){
