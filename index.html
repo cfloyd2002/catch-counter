@@ -52,6 +52,7 @@ select:focus-visible,input:focus-visible,button:focus-visible,summary:focus-visi
 .screen{position:relative;line-height:0}
 #vid{display:block;max-width:100%;background:#000}
 #overlay{position:absolute;inset:0;width:100%;height:100%;touch-action:manipulation}
+.screen.mirror #vid,.screen.mirror #overlay{transform:scaleX(-1)}
 .stage.calib #overlay{cursor:crosshair}
 .hud{position:absolute;left:14px;top:10px;color:var(--on-stage);pointer-events:none;text-shadow:0 2px 12px rgba(0,0,0,.55)}
 .count{font-family:var(--f-display);font-weight:800;font-size:5.5rem;line-height:.95;font-variant-numeric:tabular-nums}
@@ -178,6 +179,7 @@ td.n{font-variant-numeric:tabular-nums}
         <button class="btn" id="recBtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/></svg>Record</button>
         <button class="btn" id="upBtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 16V4M7 9l5-5 5 5M4 20h16"/></svg>Upload</button>
         <button class="btn" id="liveBtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3"/></svg>Live</button>
+        <button class="btn" id="flipBtn" type="button" aria-label="Switch between front and back camera"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9a8 8 0 0 1 14-3l2 2M20 15a8 8 0 0 1-14 3l-2-2"/><path d="M20 4v4h-4M4 20v-4h4"/></svg><span id="flipLabel">Back camera</span></button>
         <span class="sep" aria-hidden="true"></span>
         <button class="btn primary" id="goBtn" type="button" disabled>Count runs</button>
         <button class="btn" id="stopBtn" type="button" hidden>Stop</button>
@@ -573,7 +575,7 @@ async function loadClip(file){
   if(!file) return; await stopAll();
   if(clip && clip.url) URL.revokeObjectURL(clip.url);
   clip={file, name:file.name||"clip", key:(file.name||"clip")+":"+file.size, url:URL.createObjectURL(file), thuds:[]}; resetBallSize();
-  vid.srcObject=null; vid.src=clip.url; vid.muted=true; vid.load();
+  vid.srcObject=null; vid.src=clip.url; vid.muted=true; vid.load(); $("#screen").classList.remove("mirror");
   msg("Loading "+clip.name+"…");
   try{ await once(vid,"loadedmetadata"); }
   catch(e){ msg("This browser couldn't open that video. iPhone .mov clips play in Safari; elsewhere, try exporting the clip as MP4.",true); return; }
@@ -615,11 +617,16 @@ function finishClip(){
 async function startLive(){
   await stopAll();
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){ msg("Live camera isn't available in this browser. Record a clip instead.",true); return; }
-  const vc={facingMode:{ideal:S.facing},frameRate:{ideal:60},height:{ideal:1280}};
+  const vcs=[{facingMode:{exact:S.facing},frameRate:{ideal:60},height:{ideal:1280}},{facingMode:{ideal:S.facing},frameRate:{ideal:60},height:{ideal:1280}}];
+  const au={echoCancellation:false,noiseSuppression:false,autoGainControl:false};
   let hasMic=true;
-  try{ stream=await navigator.mediaDevices.getUserMedia({video:vc,audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}}); }
-  catch(e){ try{ stream=await navigator.mediaDevices.getUserMedia({video:vc}); hasMic=false; }
-    catch(e2){ msg("Live camera isn't allowed here. Use Record, which opens your phone's camera and brings the clip back for counting. Live mode works when this page is opened directly in a browser.",true); return; } }
+  for(const vc of vcs){
+    try{ stream=await navigator.mediaDevices.getUserMedia({video:vc,audio:au}); hasMic=true; break; }
+    catch(e){ try{ stream=await navigator.mediaDevices.getUserMedia({video:vc}); hasMic=false; break; }catch(e2){ stream=null; } }
+  }
+  if(!stream){ msg("Live camera isn't allowed here. Use Record, which opens your phone's camera and brings the clip back for counting. Live mode works when this page is opened directly in a browser.",true); return; }
+  const actual=(stream.getVideoTracks()[0].getSettings()||{}).facingMode;
+  $("#screen").classList.toggle("mirror",(actual||S.facing)==="user");
   vid.removeAttribute("src"); vid.srcObject=stream; vid.muted=true;
   try{ await vid.play(); }catch(e){}
   if(!vid.videoWidth) await once(vid,"loadedmetadata").catch(()=>{});
@@ -665,7 +672,7 @@ $("#calBtn").onclick=()=>{ calibrating=!calibrating; $("#calBtn").classList.togg
 $("#maskBtn").onclick=()=>{ showMask=!showMask; $("#maskBtn").classList.toggle("on",showMask); $("#maskBtn").setAttribute("aria-pressed",showMask); if(lastImg){ findBlobs(lastImg.data,PW,PH); drawOverlay(); } };
 ov.addEventListener("pointerdown",e=>{
   if(!calibrating||!lastImg) return;
-  const r=ov.getBoundingClientRect(), px=Math.round((e.clientX-r.left)/r.width*PW), py=Math.round((e.clientY-r.top)/r.height*PH);
+  const r=ov.getBoundingClientRect(), mir=$("#screen").classList.contains("mirror"), px=Math.round((mir?r.right-e.clientX:e.clientX-r.left)/r.width*PW), py=Math.round((e.clientY-r.top)/r.height*PH);
   const hs=[],ss=[],vs=[], d=lastImg.data;
   for(let y=py-3;y<=py+3;y++) for(let x=px-3;x<=px+3;x++){ if(x<0||y<0||x>=PW||y>=PH) continue; const p=(y*PW+x)*4, R=d[p],G=d[p+1],B=d[p+2], mx=Math.max(R,G,B), mn=Math.min(R,G,B), dd=mx-mn;
     if(!dd) continue; let h=mx===R?(G-B)/dd:mx===G?(B-R)/dd+2:(R-G)/dd+4; h*=60; if(h<0) h+=360; hs.push(h); ss.push(dd/mx); vs.push(mx/255); }
@@ -679,7 +686,11 @@ function renderSwatch(){ const [a,b]=S.hue, span=(b-a+360)%360; const stops=[0,.
 $("#resetHue").onclick=()=>{ S.hue=[...DEF.hue]; S.sMin=DEF.sMin; S.vMin=DEF.vMin; saveS(); renderSwatch(); if(lastImg){ lastBlobs=findBlobs(lastImg.data,PW,PH); drawOverlay(); } toast("Ball colour reset to cyan"); };
 $("#gapIn").value=S.gap; $("#gapIn").onchange=e=>{ const v=+e.target.value; if(v>=0.3&&v<=3){ S.gap=v; saveS(); } };
 $("#thudIn").value=S.thud; $("#thudIn").onchange=e=>{ const v=+e.target.value; if(v>=4&&v<=40){ S.thud=v; saveS(); if(clip) clip.audioP=thudsFromFile(clip.file).catch(()=>null); } };
-$("#facing").value=S.facing; $("#facing").onchange=e=>{ S.facing=e.target.value; saveS(); if(mode==="live") startLive(); };
+function setFacing(f){ S.facing=f; saveS(); $("#facing").value=f; $("#flipLabel").textContent=f==="user"?"Front camera":"Back camera"; }
+setFacing(S.facing);
+$("#facing").onchange=e=>{ setFacing(e.target.value); if(mode==="live") startLive(); };
+$("#flipBtn").onclick=()=>{ setFacing(S.facing==="user"?"environment":"user");
+  if(mode==="live") startLive(); else toast(`Live will use the ${S.facing==="user"?"front":"back"} camera`); };
 $("#voiceIn").checked=!!S.voice; $("#voiceIn").onchange=e=>{ S.voice=e.target.checked; saveS(); };
 
 function renderPatternSelect(){
